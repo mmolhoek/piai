@@ -517,6 +517,7 @@ export default function (pi: ExtensionAPI) {
   let cachedIssues: JiraIssue[] = [];
   let cachedPrMap: PrStatusMap = new Map();
   let cachedSprintIssues: JiraIssueWithAssignee[] = [];
+  let sprintLoadPromise: Promise<void> | null = null;
   let lastError: string | null = null;
 
   // ── Fetch & update status ──────────────────────────────────────────────────
@@ -549,8 +550,19 @@ export default function (pi: ExtensionAPI) {
       );
       ctx.ui.setStatus(STATUS_KEY, text);
       // Pre-fetch sprint issues in the background so /jira is instant
-      if (cachedSprintIssues.length === 0) {
-        void fetchSprintIssues().then((issues) => { cachedSprintIssues = issues; }).catch(() => undefined);
+      if (cachedSprintIssues.length === 0 && !sprintLoadPromise) {
+        ctx.ui.setStatus("jira-sprint", theme.fg("dim", "⟳ loading sprint..."));
+        sprintLoadPromise = fetchSprintIssues()
+          .then((issues) => {
+            cachedSprintIssues = issues;
+            sprintLoadPromise = null;
+            ctx.ui.setStatus("jira-sprint", theme.fg("success", "✓ sprint ready"));
+            setTimeout(() => ctx.ui.setStatus("jira-sprint", undefined), 2_000);
+          })
+          .catch(() => {
+            sprintLoadPromise = null;
+            ctx.ui.setStatus("jira-sprint", undefined);
+          });
       }
     } catch (err: unknown) {
       lastError =
@@ -795,12 +807,16 @@ export default function (pi: ExtensionAPI) {
         // ── Search flow ──
         if (cachedSprintIssues.length === 0) {
           try {
-            ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", "🎫 loading sprint..."));
-            cachedSprintIssues = await fetchSprintIssues();
-            await refresh(ctx);
+            if (sprintLoadPromise) {
+              ctx.ui.setStatus("jira-sprint", ctx.ui.theme.fg("dim", "⟳ loading sprint..."));
+              await sprintLoadPromise;
+            } else {
+              ctx.ui.setStatus("jira-sprint", ctx.ui.theme.fg("dim", "⟳ loading sprint..."));
+              cachedSprintIssues = await fetchSprintIssues();
+              ctx.ui.setStatus("jira-sprint", undefined);
+            }
           } catch (err: unknown) {
             ctx.ui.notify(`Failed to load sprint: ${err instanceof Error ? err.message : String(err)}`, "error");
-            await refresh(ctx);
             return;
           }
         }
@@ -940,31 +956,58 @@ export default function (pi: ExtensionAPI) {
       if (view === "sprint-overview") {
         // ── Sprint overview: all sprint tickets ──
         let sprintIssues: JiraIssueWithAssignee[];
-        try {
-          ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("dim", "🎫 loading sprint..."));
-          sprintIssues = await fetchSprintIssues();
-          cachedSprintIssues = sprintIssues;
-          await refresh(ctx);
-        } catch (err: unknown) {
-          ctx.ui.notify(`Failed to load sprint: ${err instanceof Error ? err.message : String(err)}`, "error");
-          await refresh(ctx);
-          return;
+        if (cachedSprintIssues.length > 0) {
+          sprintIssues = cachedSprintIssues;
+        } else {
+          try {
+            if (sprintLoadPromise) {
+              ctx.ui.setStatus("jira-sprint", ctx.ui.theme.fg("dim", "⟳ loading sprint..."));
+              await sprintLoadPromise;
+            } else {
+              ctx.ui.setStatus("jira-sprint", ctx.ui.theme.fg("dim", "⟳ loading sprint..."));
+              cachedSprintIssues = await fetchSprintIssues();
+              ctx.ui.setStatus("jira-sprint", undefined);
+            }
+          } catch (err: unknown) {
+            ctx.ui.notify(`Failed to load sprint: ${err instanceof Error ? err.message : String(err)}`, "error");
+            await refresh(ctx);
+            return;
+          }
+          sprintIssues = cachedSprintIssues;
         }
 
         // Group by status name, sorted by workflow
-        const WORKFLOW_ORDER = ["To Do", "In Progress", "Code Review", "Test", "Deploy", "Done", "Merged", "Closed"];
+        // Map exact Jira status names → sort order; statusCategory used as fallback
+        const WORKFLOW_ORDER: Record<string, number> = {
+          // To Do
+          "To Do": 0, "Open": 0, "Backlog": 0, "Reopened": 0,
+          // In Progress
+          "In Progress": 1, "In Development": 1, "Development": 1,
+          // Code Review / Ready for Review
+          "Code Review": 2, "Ready for Review": 2, "In Review": 2, "Review": 2, "Peer Review": 2,
+          // Test
+          "Test": 3, "Testing": 3, "QA": 3, "In Testing": 3, "Ready for Testing": 3,
+          // Deploy
+          "Deploy": 4, "Deployment": 4, "Ready to Deploy": 4, "In Deployment": 4,
+          // Done
+          "Done": 5, "Resolved": 5, "Closed": 5, "Merged": 5, "Released": 5, "Won't Fix": 5, "Cancelled": 5,
+        };
+        const groupOrder = (name: string, colorName: string): number => {
+          if (name in WORKFLOW_ORDER) return WORKFLOW_ORDER[name]!;
+          if (colorName === "blue-grey") return 0;  // unknown todo-like
+          if (colorName === "yellow")    return 1;  // unknown in-progress-like
+          if (colorName === "green")     return 5;  // unknown done-like
+          return 4;
+        };
         const groups = new Map<string, JiraIssueWithAssignee[]>();
         for (const issue of sprintIssues) {
           const name = issue.fields.status.name;
           if (!groups.has(name)) groups.set(name, []);
           groups.get(name)!.push(issue);
         }
-        const sortedGroups = [...groups.entries()].sort(([a], [b]) => {
-          const ai = WORKFLOW_ORDER.indexOf(a);
-          const bi = WORKFLOW_ORDER.indexOf(b);
-          // unknown statuses: place before Done based on statusCategory
-          const aOrd = ai === -1 ? (groups.get(a)![0].fields.status.statusCategory.colorName === "green" ? 99 : 50) : ai;
-          const bOrd = bi === -1 ? (groups.get(b)![0].fields.status.statusCategory.colorName === "green" ? 99 : 50) : bi;
+        const sortedGroups = [...groups.entries()].sort(([a, ai], [b, bi]) => {
+          const aOrd = groupOrder(a, ai[0]?.fields.status.statusCategory.colorName ?? "");
+          const bOrd = groupOrder(b, bi[0]?.fields.status.statusCategory.colorName ?? "");
           return aOrd - bOrd;
         });
 
@@ -972,7 +1015,7 @@ export default function (pi: ExtensionAPI) {
         const HEADER_PREFIX = "__group__";
         const flatItems: SelectItem[] = [];
         for (const [name, issues] of sortedGroups) {
-          const isDoneGroup = issues[0]?.fields.status.statusCategory.colorName === "green";
+          const isDoneGroup = groupOrder(name, issues[0]?.fields.status.statusCategory.colorName ?? "") >= 5;
           flatItems.push({
             value: `${HEADER_PREFIX}${name}`,
             label: `── ${name.toUpperCase()} (${issues.length}) ──`,
