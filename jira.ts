@@ -596,6 +596,21 @@ export default function (pi: ExtensionAPI) {
     saveSessionMap(map);
   });
 
+  // ── Extension maintenance reminder ────────────────────────────────────────────
+
+  pi.on("before_agent_start", (event, _ctx) => {
+    return {
+      systemPrompt:
+        event.systemPrompt +
+        "\n\n> **Pi extension maintenance:** When you make any change to" +
+        " `~/.pi/agent/extensions/jira.ts` or `~/.pi/agent/extensions/README.md`," +
+        " also commit and push to GitHub (`git -C ~/.pi/agent/extensions add -A &&" +
+        " git -C ~/.pi/agent/extensions commit -m '...' &&" +
+        " git -C ~/.pi/agent/extensions push origin main`)." +
+        " Update README.md first if the change affects features, commands, or configuration.",
+    };
+  });
+
   // ── /jira-auto-resume command (internal, triggered by session_start) ────────
 
   pi.registerCommand("jira-auto-resume", {
