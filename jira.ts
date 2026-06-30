@@ -159,6 +159,41 @@ async function performTransition(issueKey: string, transitionId: string): Promis
   });
 }
 
+interface JiraIssueDetails {
+  key: string;
+  fields: {
+    summary: string;
+    description: string | null;
+    status: { name: string };
+    issuetype: { name: string };
+    priority?: { name: string } | null;
+    assignee?: { displayName: string } | null;
+  };
+}
+
+async function fetchIssueDetails(issueKey: string): Promise<JiraIssueDetails> {
+  return jiraGet<JiraIssueDetails>(
+    `/rest/api/2/issue/${issueKey}?fields=summary,description,status,issuetype,priority,assignee`,
+  );
+}
+
+function buildStoryContext(issueKey: string, d: JiraIssueDetails): string {
+  const lines: string[] = [
+    `# ${issueKey}: ${formatSummary(d.fields.summary)}`,
+    ``,
+    `| | |`,
+    `|---|---|`,
+    `| Status | ${d.fields.status.name} |`,
+    `| Type | ${d.fields.issuetype.name} |`,
+  ];
+  if (d.fields.priority?.name) lines.push(`| Priority | ${d.fields.priority.name} |`);
+  if (d.fields.assignee?.displayName) lines.push(`| Assignee | ${d.fields.assignee.displayName} |`);
+  lines.push(``, `Jira link: ${JIRA_BASE_URL}${JIRA_CONTEXT_PATH}/browse/${issueKey}`);
+  const desc = d.fields.description?.trim();
+  if (desc) lines.push(``, `## Description`, ``, desc);
+  return lines.join("\n");
+}
+
 async function jiraPut(path: string, body: unknown): Promise<void> {
   const token = process.env["JIRA_TOKEN"];
   if (!token) throw new Error("JIRA_TOKEN is not set");
@@ -934,13 +969,14 @@ export default function (pi: ExtensionAPI) {
         const sprintIssue = cachedSprintIssues.find((i) => i.key === searchKey);
         const sprintPr = cachedPrMap.get(searchKey);
         const isAssignedToMe = sprintIssue?.fields.assignee?.name === ASSIGNEE;
-        type SearchAction = "assign" | "browser" | "pr" | "transition" | "back";
+        type SearchAction = "assign" | "browser" | "pr" | "transition" | "new-session" | "back";
         const searchActionItems: SelectItem[] = [
           ...(!isAssignedToMe ? [{ value: "assign" as SearchAction, label: "👤 Assign to me", description: `Assign ${searchKey} to ${ASSIGNEE}` }] : []),
-          { value: "browser",    label: "🌐 Open Jira in browser", description: `${JIRA_BASE_URL}${JIRA_CONTEXT_PATH}/browse/${searchKey}` },
+          { value: "browser",     label: "🌐 Open Jira in browser", description: `${JIRA_BASE_URL}${JIRA_CONTEXT_PATH}/browse/${searchKey}` },
           ...(sprintPr ? [{ value: "pr" as SearchAction, label: `🔀 Open PR #${sprintPr.number} in browser`, description: sprintPr.url }] : []),
-          { value: "transition", label: "↺ Transition status", description: `Change the status of ${searchKey}` },
-          { value: "back",       label: "← Back", description: "" },
+          { value: "new-session", label: "🚀 New LLM session for this story", description: `Start fresh session with ${searchKey} as context` },
+          { value: "transition",  label: "↺ Transition status", description: `Change the status of ${searchKey}` },
+          { value: "back",        label: "← Back", description: "" },
         ];
         const searchAction = await ctx.ui.custom<SearchAction | null>((tui, theme, _kb, done) => {
           const container = new Container();
@@ -977,6 +1013,23 @@ export default function (pi: ExtensionAPI) {
           const url = searchAction === "pr" && sprintPr ? sprintPr.url : `${JIRA_BASE_URL}${JIRA_CONTEXT_PATH}/browse/${searchKey}`;
           try { execSync(process.platform === "darwin" ? `open "${url}"` : `xdg-open "${url}"`); ctx.ui.notify("Opened in browser", "info"); }
           catch { ctx.ui.setEditorText(url); }
+          return;
+        }
+        if (searchAction === "new-session") {
+          try {
+            ctx.ui.notify(`Loading ${searchKey}...`, "info");
+            const details = await fetchIssueDetails(searchKey);
+            const context = buildStoryContext(searchKey, details);
+            await ctx.newSession({
+              withSession: async (newCtx) => {
+                await newCtx.sendUserMessage(
+                  `I'm starting work on Jira story **${searchKey}**: ${formatSummary(details.fields.summary)}\n\n${context}\n\nPlease summarize what needs to be done and ask how you can help.`,
+                );
+              },
+            });
+          } catch (err: unknown) {
+            ctx.ui.notify(`Failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+          }
           return;
         }
         if (searchAction === "transition") {
@@ -1127,13 +1180,14 @@ export default function (pi: ExtensionAPI) {
         const sprintPr = cachedPrMap.get(sprintKey);
         const isAssignedToMe = sprintIssue?.fields.assignee?.name === ASSIGNEE;
 
-        type SprintAction = "assign" | "browser" | "pr" | "transition" | "back";
+        type SprintAction = "assign" | "browser" | "pr" | "transition" | "new-session" | "back";
         const sprintActionItems: SelectItem[] = [
           ...(!isAssignedToMe ? [{ value: "assign" as SprintAction, label: "👤 Assign to me", description: `Assign ${sprintKey} to ${ASSIGNEE}` }] : []),
-          { value: "browser",    label: "🌐 Open Jira in browser", description: `${JIRA_BASE_URL}${JIRA_CONTEXT_PATH}/browse/${sprintKey}` },
+          { value: "browser",     label: "🌐 Open Jira in browser", description: `${JIRA_BASE_URL}${JIRA_CONTEXT_PATH}/browse/${sprintKey}` },
           ...(sprintPr ? [{ value: "pr" as SprintAction, label: `🔀 Open PR #${sprintPr.number} in browser`, description: sprintPr.url }] : []),
-          { value: "transition", label: "↺ Transition status",  description: `Change the status of ${sprintKey}` },
-          { value: "back",       label: "← Back",              description: "" },
+          { value: "new-session", label: "🚀 New LLM session for this story", description: `Start fresh session with ${sprintKey} as context` },
+          { value: "transition",  label: "↺ Transition status", description: `Change the status of ${sprintKey}` },
+          { value: "back",        label: "← Back", description: "" },
         ];
 
         const sprintAction = await ctx.ui.custom<SprintAction | null>((tui, theme, _kb, done) => {
@@ -1188,6 +1242,23 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
+        if (sprintAction === "new-session") {
+          try {
+            ctx.ui.notify(`Loading ${sprintKey}...`, "info");
+            const details = await fetchIssueDetails(sprintKey);
+            const context = buildStoryContext(sprintKey, details);
+            await ctx.newSession({
+              withSession: async (newCtx) => {
+                await newCtx.sendUserMessage(
+                  `I'm starting work on Jira story **${sprintKey}**: ${formatSummary(details.fields.summary)}\n\n${context}\n\nPlease summarize what needs to be done and ask how you can help.`,
+                );
+              },
+            });
+          } catch (err: unknown) {
+            ctx.ui.notify(`Failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+          }
+          return;
+        }
         if (sprintAction === "transition") {
           let transitions: JiraTransition[];
           try { transitions = await fetchTransitions(sprintKey); }
@@ -1288,12 +1359,13 @@ export default function (pi: ExtensionAPI) {
 
       // ── Step 2: action submenu ──
       const chosenPr = cachedPrMap.get(chosenKey);
-      type TicketAction = "browser" | "pr" | "transition" | "back";
+      type TicketAction = "browser" | "pr" | "new-session" | "transition" | "back";
       const actionItems: SelectItem[] = [
-        { value: "browser",    label: "🌐 Open Jira in browser", description: `${JIRA_BASE_URL}${JIRA_CONTEXT_PATH}/browse/${chosenKey}` },
+        { value: "browser",     label: "🌐 Open Jira in browser", description: `${JIRA_BASE_URL}${JIRA_CONTEXT_PATH}/browse/${chosenKey}` },
         ...(chosenPr ? [{ value: "pr" as TicketAction, label: `🔀 Open PR #${chosenPr.number} in browser`, description: chosenPr.url }] : []),
-        { value: "transition", label: "↺ Transition status",  description: `Change the status of ${chosenKey}` },
-        { value: "back",       label: "← Back",              description: "" },
+        { value: "new-session", label: "🚀 New LLM session for this story", description: `Start fresh session with ${chosenKey} as context` },
+        { value: "transition",  label: "↺ Transition status",  description: `Change the status of ${chosenKey}` },
+        { value: "back",        label: "← Back",              description: "" },
       ];
 
       const action = await ctx.ui.custom<TicketAction | null>((tui, theme, _kb, done) => {
@@ -1336,6 +1408,25 @@ export default function (pi: ExtensionAPI) {
         } catch {
           ctx.ui.setEditorText(url);
           ctx.ui.notify(`URL copied to editor`, "info");
+        }
+        return;
+      }
+
+      // ── Step 3c: new session ──
+      if (action === "new-session") {
+        try {
+          ctx.ui.notify(`Loading ${chosenKey}...`, "info");
+          const details = await fetchIssueDetails(chosenKey);
+          const context = buildStoryContext(chosenKey, details);
+          await ctx.newSession({
+            withSession: async (newCtx) => {
+              await newCtx.sendUserMessage(
+                `I'm starting work on Jira story **${chosenKey}**: ${formatSummary(details.fields.summary)}\n\n${context}\n\nPlease summarize what needs to be done and ask how you can help.`,
+              );
+            },
+          });
+        } catch (err: unknown) {
+          ctx.ui.notify(`Failed: ${err instanceof Error ? err.message : String(err)}`, "error");
         }
         return;
       }
