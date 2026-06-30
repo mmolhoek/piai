@@ -25,6 +25,11 @@ const MAX_RESULTS = 30;
 const STATUS_KEY = "jira-tickets";
 const SESSION_MAP_PATH = join(homedir(), ".pi", "jira-session-map.json");
 
+/** Email of the person to auto-assign when a ticket moves to a test lane */
+const TEST_LANE_ASSIGNEE_EMAIL = process.env["JIRA_TEST_ASSIGNEE"] ?? null;
+/** Status names (case-insensitive substring match) that trigger auto-assign to tester */
+const TEST_LANE_STATUSES = ["test", "qa", "ready for test", "in testing"];
+
 // ── Session map helpers ───────────────────────────────────────────────────────
 
 function loadSessionMap(): Record<string, string> {
@@ -200,6 +205,25 @@ async function assignIssue(issueKey: string): Promise<void> {
   await jiraPut(`/rest/api/2/issue/${issueKey}`, {
     fields: { assignee: { name: ASSIGNEE } },
   });
+}
+
+let _cachedTestAssignee: string | null | undefined; // undefined = not yet resolved
+
+async function resolveTestAssignee(): Promise<string | null> {
+  if (!TEST_LANE_ASSIGNEE_EMAIL) return null;
+  if (_cachedTestAssignee !== undefined) return _cachedTestAssignee;
+  try {
+    const users = await jiraGet<Array<{ name: string; emailAddress: string }>>(
+      `/rest/api/2/user/search?username=${encodeURIComponent(TEST_LANE_ASSIGNEE_EMAIL)}&maxResults=5`,
+    );
+    const match = users.find(
+      (u) => u.emailAddress?.toLowerCase() === TEST_LANE_ASSIGNEE_EMAIL.toLowerCase(),
+    );
+    _cachedTestAssignee = match?.name ?? null;
+  } catch {
+    _cachedTestAssignee = null;
+  }
+  return _cachedTestAssignee;
 }
 
 async function fetchMyIssues(signal?: AbortSignal): Promise<JiraIssue[]> {
@@ -745,6 +769,35 @@ export default function (pi: ExtensionAPI) {
 
   type JiraView = "my-tickets" | "sprint-overview" | "search";
 
+  /** Perform a transition and optionally auto-assign to the tester for test-lane moves. */
+  async function doTransition(
+    issueKey: string,
+    transitionId: string,
+    transitions: JiraTransition[],
+    ctx: Parameters<Parameters<typeof pi.registerCommand>[1]["handler"]>[1],
+  ): Promise<void> {
+    await performTransition(issueKey, transitionId);
+    const applied = transitions.find((t) => t.id === transitionId);
+    const targetName = applied?.to.name ?? "";
+    ctx.ui.notify(`${issueKey} → ${targetName || "transitioned"}`, "info");
+
+    const isTestLane = TEST_LANE_STATUSES.some((s) =>
+      targetName.toLowerCase().includes(s),
+    );
+    if (isTestLane) {
+      const tester = await resolveTestAssignee();
+      if (tester) {
+        try {
+          await jiraPut(`/rest/api/2/issue/${issueKey}`, { fields: { assignee: { name: tester } } });
+          ctx.ui.notify(`Auto-assigned to ${tester} (test lane)`, "info");
+        } catch {
+          // non-fatal — transition already succeeded
+        }
+      }
+    }
+    await refresh(ctx);
+  }
+
   const makeJiraHandler = (forceView?: JiraView): Parameters<typeof pi.registerCommand>[1]["handler"] =>
     async (_args, ctx) => {
       if (!ctx.hasUI) {
@@ -945,9 +998,7 @@ export default function (pi: ExtensionAPI) {
           });
           if (!tid) return;
           try {
-            await performTransition(searchKey, tid);
-            ctx.ui.notify(`${searchKey} → ${transitions.find((t) => t.id === tid)?.to.name ?? "transitioned"}`, "info");
-            await refresh(ctx);
+            await doTransition(searchKey, tid, transitions, ctx);
           } catch (err: unknown) { ctx.ui.notify(`Transition failed: ${err instanceof Error ? err.message : String(err)}`, "error"); }
         }
         return;
@@ -1172,10 +1223,7 @@ export default function (pi: ExtensionAPI) {
           });
           if (!transitionId) return;
           try {
-            await performTransition(sprintKey, transitionId);
-            const applied = transitions.find((t) => t.id === transitionId);
-            ctx.ui.notify(`${sprintKey} → ${applied?.to.name ?? "transitioned"}`, "info");
-            await refresh(ctx);
+            await doTransition(sprintKey, transitionId, transitions, ctx);
           } catch (err: unknown) {
             ctx.ui.notify(`Transition failed: ${err instanceof Error ? err.message : String(err)}`, "error");
           }
@@ -1340,10 +1388,7 @@ export default function (pi: ExtensionAPI) {
       if (!transitionId) return;
 
       try {
-        await performTransition(chosenKey, transitionId);
-        const applied = transitions.find((t) => t.id === transitionId);
-        ctx.ui.notify(`${chosenKey} → ${applied?.to.name ?? "transitioned"}`, "info");
-        await refresh(ctx);
+        await doTransition(chosenKey, transitionId, transitions, ctx);
       } catch (err: unknown) {
         ctx.ui.notify(`Transition failed: ${err instanceof Error ? err.message : String(err)}`, "error");
       }
