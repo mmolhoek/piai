@@ -1,0 +1,21 @@
+{
+  "name": "pi-jira",
+  "version": "1.0.0",
+  "description": "Jira Data Center integration for pi — live status bar, ticket browser, PR status, transitions, and auto session-resume",
+  "keywords": ["pi-package", "jira", "jira-data-center"],
+  "license": "MIT",
+  "author": "Mischa Molhoek <mischa@molhoek.dev>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mmolhoek/piai.git"
+  },
+  "homepage": "https://github.com/mmolhoek/piai#readme",
+  "pi": {
+    "extensions": ["./jira.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}

@@ -1,7 +1,7 @@
 /**
  * Jira Extension
  *
- * Fetches your assigned Jira tickets from atlassian.dpgmedia.net and shows them
+ * Fetches your assigned Jira tickets and shows them
  * in the statusbar. Use `/jira` to open an interactive ticket browser.
  *
  * Required env var: JIRA_TOKEN  (Jira Data Center Personal Access Token)
@@ -14,16 +14,16 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { Container, Key, type SelectItem, SelectList, Text, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 
-const JIRA_BASE_URL = "https://atlassian.dpgmedia.net";
-const JIRA_CONTEXT_PATH = "/jira";
-const BOARD_ID = 2784;
-const ASSIGNEE = "molhoe000";
-const MAX_RESULTS = 30;
+const JIRA_BASE_URL = (process.env["JIRA_BASE_URL"] ?? "").replace(/\/$/, "");
+const JIRA_CONTEXT_PATH = process.env["JIRA_CONTEXT_PATH"] ?? "";
+const BOARD_ID = parseInt(process.env["JIRA_BOARD_ID"] ?? "0", 10);
+const ASSIGNEE = process.env["JIRA_ASSIGNEE"] ?? "";
+const MAX_RESULTS = parseInt(process.env["JIRA_MAX_RESULTS"] ?? "30", 10);
 const STATUS_KEY = "jira-tickets";
-const SESSION_MAP_PATH = join(homedir(), ".pi", "jira-session-map.json");
+const SESSION_MAP_PATH = join(homedir(), CONFIG_DIR_NAME, "jira-session-map.json");
 
 /** Email of the person to auto-assign when a ticket moves to a test lane */
 const TEST_LANE_ASSIGNEE_EMAIL = process.env["JIRA_TEST_ASSIGNEE"] ?? null;
@@ -48,10 +48,10 @@ function saveSessionMap(map: Record<string, string>): void {
   }
 }
 
-/** Turn a branch slug like 'MDN-36715-red-dot-on-for-you-tab' into 'MDN-36715: Red dot on for you tab' */
-function formatMdnSlug(cwd: string): string {
-  const m = cwd.match(/(MDN-\d+)-([\w-]+)/);
-  if (!m) return (cwd.match(/MDN-\d+/) ?? [""])[0];
+/** Turn a branch slug like 'PROJ-123-fix-login-bug' into 'PROJ-123: Fix login bug' */
+function formatJiraSlug(slug: string): string {
+  const m = slug.match(/([A-Z]+-\d+)-([\w-]+)/);
+  if (!m) return (slug.match(/[A-Z]+-\d+/) ?? [""])[0];
   const title = m[2].replace(/-/g, " ");
   return `${m[1]}: ${title.charAt(0).toUpperCase()}${title.slice(1)}`;
 }
@@ -376,7 +376,7 @@ async function fetchAllPrStatuses(cwd: string): Promise<PrStatusMap> {
     }>;
     const map: PrStatusMap = new Map();
     for (const pr of prs) {
-      const m = pr.headRefName.match(/MDN-\d+/);
+      const m = pr.headRefName.match(/[A-Z]+-\d+/);
       if (m) map.set(m[0], parsePrRaw(pr));
     }
     return map;
@@ -427,8 +427,8 @@ function formatPrBadge(
 interface GitInfo {
   changes: string;         // e.g. "↑1 staged · ~3 modified"
   branch: string;          // current local branch name
-  upstream: string | null; // full ref, e.g. "origin/feature/MDN-36715-..."
-  upstreamBranch: string | null; // branch part only, e.g. "feature/MDN-36715-..."
+  upstream: string | null; // full ref, e.g. "origin/feature/PROJ-123-fix-bug"
+  upstreamBranch: string | null; // branch part only, e.g. "feature/PROJ-123-fix-bug"
   ahead: number;           // commits ahead of upstream
   behind: number;          // commits behind upstream
 }
@@ -499,7 +499,7 @@ function formatSummary(summary: string): string {
 
 
 /**
- * e.g.  🎫 In Progress: MDN-36715, MDN-36700  ·  To Do: MDN-36710
+ * e.g.  🎫 In Progress: PROJ-100, PROJ-200  ·  To Do: PROJ-300
  */
 function buildStatusText(
   issues: JiraIssue[],
@@ -589,9 +589,9 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setStatus(STATUS_KEY, theme.fg("dim", "🎫 loading…"));
 
     try {
-      const cwdKey = (ctx.cwd.match(/MDN-\d+/) ?? [])[0] ?? null;
+      const cwdKey = (ctx.cwd.match(/[A-Z]+-\d+/) ?? [])[0] ?? null;
       const branch = gitRun("git branch --show-current", ctx.cwd) ?? "";
-      const branchKey = (branch.match(/MDN-\d+/) ?? [])[0] ?? null;
+      const branchKey = (branch.match(/[A-Z]+-\d+/) ?? [])[0] ?? null;
       const activeKey = cwdKey ?? branchKey ?? null;
       const [issues, prMap] = await Promise.all([
         fetchMyIssues(signal),
@@ -633,17 +633,24 @@ export default function (pi: ExtensionAPI) {
   // ── session_start: initial fetch + auto-resume ───────────────────────────
 
   pi.on("session_start", async (event, ctx) => {
-    if (!process.env["JIRA_TOKEN"]) return;
+    const missing = ["JIRA_TOKEN", "JIRA_BASE_URL", "JIRA_BOARD_ID", "JIRA_ASSIGNEE"].filter(
+      (v) => !process.env[v],
+    );
+    if (missing.length > 0) {
+      if (event.reason === "startup")
+        ctx.ui.notify(`Jira: set ${missing.join(", ")} to enable the extension`, "warning");
+      return;
+    }
 
-    // On fresh startup, check if there is a saved session for this MDN ticket
+    // On fresh startup, check if there is a saved session for this Jira ticket
     if (event.reason === "startup") {
       const branch = gitRun("git branch --show-current", ctx.cwd) ?? "";
-      const mdnKey = (ctx.cwd.match(/MDN-\d+/) ?? [])[0] ?? (branch.match(/MDN-\d+/) ?? [])[0];
-      if (mdnKey) {
+      const issueKey = (ctx.cwd.match(/[A-Z]+-\d+/) ?? [])[0] ?? (branch.match(/[A-Z]+-\d+/) ?? [])[0];
+      if (issueKey) {
         const map = loadSessionMap();
-        const target = map[mdnKey];
+        const target = map[issueKey];
         if (target && existsSync(target) && target !== ctx.sessionManager.getSessionFile()) {
-          const label = formatMdnSlug(ctx.cwd);
+          const label = formatJiraSlug(ctx.cwd);
           ctx.ui.notify(`↩ Previous session found for ${label} — press Enter to resume`, "info");
           ctx.ui.setEditorText(`/jira-auto-resume ${target}`);
           return; // refresh happens after the switch via session_start reason:"resume"
@@ -658,29 +665,15 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     const branch = gitRun("git branch --show-current", ctx.cwd) ?? "";
-    const mdnKey = (ctx.cwd.match(/MDN-\d+/) ?? [])[0] ?? (branch.match(/MDN-\d+/) ?? [])[0];
-    if (!mdnKey) return;
+    const issueKey = (ctx.cwd.match(/[A-Z]+-\d+/) ?? [])[0] ?? (branch.match(/[A-Z]+-\d+/) ?? [])[0];
+    if (!issueKey) return;
     const sessionFile = ctx.sessionManager.getSessionFile();
     if (!sessionFile) return;
     const map = loadSessionMap();
-    map[mdnKey] = sessionFile;
+    map[issueKey] = sessionFile;
     saveSessionMap(map);
   });
 
-  // ── Extension maintenance reminder ────────────────────────────────────────────
-
-  pi.on("before_agent_start", (event, _ctx) => {
-    return {
-      systemPrompt:
-        event.systemPrompt +
-        "\n\n> **Pi extension maintenance:** When you make any change to" +
-        " `~/.pi/agent/extensions/jira.ts` or `~/.pi/agent/extensions/README.md`," +
-        " also commit and push to GitHub (`git -C ~/.pi/agent/extensions add -A &&" +
-        " git -C ~/.pi/agent/extensions commit -m '...' &&" +
-        " git -C ~/.pi/agent/extensions push origin main`)." +
-        " Update README.md first if the change affects features, commands, or configuration.",
-    };
-  });
 
   // ── /jira-auto-resume command (internal, triggered by session_start) ────────
 
@@ -692,7 +685,7 @@ export default function (pi: ExtensionAPI) {
         await refresh(ctx);
         return;
       }
-      const label = formatMdnSlug(ctx.cwd);
+      const label = formatJiraSlug(ctx.cwd);
       ctx.ui.notify(`↩ Resuming session for ${label}`, "info");
       await ctx.switchSession(sessionPath);
     },
@@ -839,8 +832,11 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify("Jira browser requires interactive mode", "error");
         return;
       }
-      if (!process.env["JIRA_TOKEN"]) {
-        ctx.ui.notify("JIRA_TOKEN is not set", "error");
+      const missingEnv = ["JIRA_TOKEN", "JIRA_BASE_URL", "JIRA_BOARD_ID", "JIRA_ASSIGNEE"].filter(
+        (v) => !process.env[v],
+      );
+      if (missingEnv.length > 0) {
+        ctx.ui.notify(`Jira: set ${missingEnv.join(", ")} to enable`, "error");
         return;
       }
 

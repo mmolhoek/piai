@@ -1,24 +1,28 @@
-# piai — Pi Extensions
+# pi-jira — Jira Data Center Integration for Pi
 
-Personal [pi](https://github.com/earendil-works/pi-coding-agent) extensions for day-to-day development workflow.
+A full [Jira Data Center](https://www.atlassian.com/software/jira) integration for [pi](https://github.com/earendil-works/pi-coding-agent) that keeps your sprint tickets visible at all times and lets you manage them without leaving the terminal.
 
 ## Extensions
 
-### 🎫 `jira.ts` — Jira Integration
-
-A full Jira integration for [pi](https://github.com/earendil-works/pi-coding-agent) that keeps your sprint tickets visible at all times and lets you manage them without leaving the terminal.
+### 🎫 `jira.ts`
 
 #### Prerequisites
 
 | Requirement | Notes |
 |---|---|
 | `JIRA_TOKEN` env var | Jira Data Center Personal Access Token |
+| `JIRA_BASE_URL` env var | Your Jira instance URL, e.g. `https://jira.yourcompany.com` |
+| `JIRA_BOARD_ID` env var | Agile board ID (visible in the board URL: `?rapidView=NNNN`) |
+| `JIRA_ASSIGNEE` env var | Your Jira username |
 | `JIRA_TEST_ASSIGNEE` env var | *(optional)* Email of tester for auto-assign on test-lane transitions |
 | [`gh` CLI](https://cli.github.com/) | Used for PR status; gracefully skipped if absent |
 
 ```bash
 export JIRA_TOKEN=your_personal_access_token
-export JIRA_TEST_ASSIGNEE=susanne.niessen@dpgmedia.nl   # optional
+export JIRA_BASE_URL=https://jira.yourcompany.com
+export JIRA_BOARD_ID=1234
+export JIRA_ASSIGNEE=your.username
+export JIRA_TEST_ASSIGNEE=tester@yourcompany.com   # optional
 pi
 ```
 
@@ -120,9 +124,9 @@ Live-filter across the full sprint as you type. Results update instantly below t
 
 | Query type | Example | Matches |
 |---|---|---|
-| MDN number fragment | `36715` or `367` | All tickets whose MDN key contains the digits |
+| Ticket key fragment | `36715` or `LOGIN` | All tickets whose key contains the text |
 | Exact PR number | `790` | The ticket linked to PR #790 |
-| Title keyword | `red dot` | Tickets whose summary contains the text |
+| Title keyword | `fix login` | Tickets whose summary contains the text |
 
 `↑↓` navigate · `Enter` open action menu · `Esc` cancel
 
@@ -175,39 +179,43 @@ Press **Enter** to switch into that session. The extension command bypasses the 
 
 #### Configuration
 
-Constants at the top of `jira.ts`:
-
-| Constant | Default | Description |
-|---|---|---|
-| `JIRA_BASE_URL` | `https://atlassian.dpgmedia.net` | Jira instance base URL |
-| `JIRA_CONTEXT_PATH` | `/jira` | Jira context path (the `/jira` prefix in the URL) |
-| `BOARD_ID` | `2784` | Agile board ID used to find the active sprint |
-| `ASSIGNEE` | `molhoe000` | Your Jira username for "my tickets" and self-assign |
-| `MAX_RESULTS` | `30` | Max tickets in the "my tickets" view |
-| `TEST_LANE_STATUSES` | `["test","qa","ready for test","in testing"]` | Status names that trigger auto-assign to tester |
-
-Environment variables:
+All configuration is via environment variables:
 
 | Variable | Required | Description |
 |---|---|---|
 | `JIRA_TOKEN` | ✅ | Jira Data Center Personal Access Token |
+| `JIRA_BASE_URL` | ✅ | Your Jira instance base URL, e.g. `https://jira.yourcompany.com` |
+| `JIRA_BOARD_ID` | ✅ | Agile board ID (visible in the board URL: `?rapidView=NNNN`) |
+| `JIRA_ASSIGNEE` | ✅ | Your Jira username for "my tickets" and self-assign |
+| `JIRA_CONTEXT_PATH` | ❌ | Jira context path prefix (default: empty). Some instances serve Jira under `/jira` |
+| `JIRA_MAX_RESULTS` | ❌ | Max tickets in the "my tickets" view (default: `30`) |
 | `JIRA_TEST_ASSIGNEE` | ❌ | Email of the tester to auto-assign on test-lane transitions |
+
+The `TEST_LANE_STATUSES` that trigger auto-assign are: `test`, `qa`, `ready for test`, `in testing` (case-insensitive substring match).
 
 ---
 
 ## Installation
 
-Extensions live in `~/.pi/agent/extensions/` and are picked up automatically by pi.
-
 ```bash
-git clone git@github.com:mmolhoek/piai.git ~/.pi/agent/extensions
+pi install git:github.com/mmolhoek/piai
 ```
 
-Add to your shell profile (`.zshrc`, `.bashrc`, etc.):
+Or once published to npm:
+
+```bash
+pi install npm:pi-jira
+```
+
+Then add to your shell profile (`.zshrc`, `.bashrc`, etc.):
 
 ```bash
 export JIRA_TOKEN=your_personal_access_token
-export JIRA_TEST_ASSIGNEE=susanne.niessen@dpgmedia.nl
+export JIRA_BASE_URL=https://jira.yourcompany.com
+export JIRA_BOARD_ID=1234                           # from the board URL (?rapidView=NNNN)
+export JIRA_ASSIGNEE=your.username                  # your Jira username
+export JIRA_TEST_ASSIGNEE=tester@yourcompany.com    # optional: auto-assign on test-lane
+export JIRA_CONTEXT_PATH=/jira                      # optional: only if your instance uses a context path
 ```
 
 > **Note:** No build step or `npm install` required — pi loads TypeScript extensions directly.
